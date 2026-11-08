@@ -6,6 +6,8 @@ repository = "https://github.com/erebe/wstunnel.git"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+serde_json = "1.0"
+ring = "0.17.14"
 ahash = { version = "0.8.12", features = [] }
 anyhow = "1.0.102"
 base64 = "0.22.1"

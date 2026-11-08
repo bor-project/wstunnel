@@ -57,6 +57,10 @@ pub struct Wstunnel {
 pub enum Commands {
     Client(Box<Client>),
     Server(Box<Server>),
+    GetServer {
+        #[arg(short = 'c', long)]
+        config: std::path::PathBuf,
+    },
 }
 
 #[tokio::main]
@@ -93,6 +97,9 @@ async fn main() -> anyhow::Result<()> {
     }
 
     match args.commands {
+        Commands::GetServer { config } => {
+            wstunnel::http_get::serve(&config).await?;
+        }
         Commands::Client(args) => {
             run_client(*args, DefaultTokioExecutor::default())
                 .await

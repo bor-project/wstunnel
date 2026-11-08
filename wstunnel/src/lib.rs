@@ -1,3 +1,5 @@
+pub mod http_get;
+mod http_get_auth;
 pub mod config;
 mod embedded_certificate;
 pub mod executor;
