@@ -86,7 +86,7 @@ impl Keys {
     }
 
     fn request_message(&self, method: &str, path: &str, query: &BTreeMap<String, String>, payload: &[u8], stamp: &Stamp) -> Option<Vec<u8>> {
-        if method != "GET" || !path.starts_with('/') || path.len() > 1024 || query.len() > 32
+        if !matches!(method, "GET" | "POST") || !path.starts_with('/') || path.len() > 1024 || query.len() > 32
             || query.iter().any(|(name,value)| name.is_empty() || name.len() > 64 || value.len() > 1024) { return None; }
         let mut data = Vec::new();
         put(&mut data, b"amneziageo.http-get.request.v2");
@@ -286,6 +286,20 @@ mod tests {
             headers.insert(hyper::header::HeaderName::from_static(name),value.parse().unwrap());
         }
         headers
+    }
+
+    #[test]
+    fn request_method_and_payload_are_authenticated() {
+        let keys = Keys::derive("fb4d9db7-6e93-4cff-a65c-a60c64655872").unwrap();
+        let stamp = Stamp { epoch: [1; 16], nonce: [2; 16], time: 42 };
+        let query = BTreeMap::from([("op".to_string(), "push".to_string())]);
+        let body = [0, 1, 42];
+        let message = keys.request_message("POST", "/relay/", &query, &body, &stamp).unwrap();
+        let signature = sign(&keys.request, &message);
+        assert!(keys.verify_request("POST", "/relay/", &query, &body, &stamp, &signature).is_some());
+        assert!(keys.verify_request("GET", "/relay/", &query, &body, &stamp, &signature).is_none());
+        assert!(keys.verify_request("POST", "/relay/", &query, &[0, 1, 43], &stamp, &signature).is_none());
+        assert!(keys.request_message("PUT", "/relay/", &query, &body, &stamp).is_none());
     }
 
     #[test]

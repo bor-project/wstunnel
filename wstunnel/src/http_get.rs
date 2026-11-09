@@ -1,7 +1,7 @@
 use anyhow::{Context, bail};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full};
+use http_body_util::{BodyExt, Full, Limited};
 use crate::http_get_auth as auth;
 use hyper::{Method, Request, Response, StatusCode, body::Incoming, service::service_fn};
 use hyper_util::rt::TokioIo;
@@ -28,12 +28,16 @@ struct Config {
 #[derive(Deserialize)]
 struct Settings {
     version: u32,
+    #[serde(default = "get_method")]
+    method: String,
     port: u16,
     path: String,
     credentials: HashSet<String>,
     restricted: bool,
     destinations: Vec<Destination>,
 }
+
+fn get_method() -> String { "GET".to_string() }
 
 #[derive(Deserialize)]
 struct Destination {
@@ -198,16 +202,32 @@ async fn signed(response: Response<Full<Bytes>>, verified: &auth::Verified, guar
 
 async fn handle(request: Request<Incoming>, state: Arc<State>) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let empty = |status| Ok(reply(status, Vec::new(), 0));
-    if request.method() != Method::GET { return empty(StatusCode::METHOD_NOT_ALLOWED); }
-    if request.headers().contains_key("transfer-encoding") || request.headers().contains_key("upgrade")
-        || request.headers().get("content-length").is_some_and(|value| value.as_bytes() != b"0") {
+    if request.method().as_str() != state.settings.method { return empty(StatusCode::METHOD_NOT_ALLOWED); }
+    if request.headers().contains_key("upgrade")
+        || (request.method() == Method::GET && (request.headers().contains_key("transfer-encoding")
+            || request.headers().get("content-length").is_some_and(|value| value.as_bytes() != b"0")))
+        || (request.method() == Method::POST && request.headers().contains_key("x-wg-data")) {
         return empty(StatusCode::BAD_REQUEST);
     }
+    let (parts, body) = request.into_parts();
+    let payload = if parts.method == Method::POST {
+        match tokio::time::timeout(Duration::from_secs(5), Limited::new(body, MAX_UPLOAD).collect()).await {
+            Ok(Ok(body)) => body.to_bytes().to_vec(),
+            Ok(Err(_)) => return empty(StatusCode::PAYLOAD_TOO_LARGE),
+            Err(_) => return empty(StatusCode::REQUEST_TIMEOUT),
+        }
+    } else if parts.headers.contains_key("x-wg-data") {
+        let Some(encoded) = auth::one(&parts.headers,"x-wg-data").filter(|value| value.len() <= 5464) else { return empty(StatusCode::PAYLOAD_TOO_LARGE); };
+        let Ok(value) = STANDARD.decode(encoded) else { return empty(StatusCode::BAD_REQUEST); };
+        if value.len() > MAX_UPLOAD || STANDARD.encode(&value) != encoded { return empty(StatusCode::BAD_REQUEST); }
+        value
+    } else { Vec::new() };
+    let request = Request::from_parts(parts, ());
     let probe = probe_nonce(request.uri().path(), &state.settings.path);
     if request.uri().path() != state.settings.path && probe.is_none() { return empty(StatusCode::NOT_FOUND); }
     let Some(query) = auth::query(request.uri().query().unwrap_or("")) else { return empty(StatusCode::BAD_REQUEST); };
     if request.uri().path() == state.settings.path && query.get("op").is_some_and(|value| value == "challenge") {
-        if query.len() != 2 || request.headers().contains_key("x-wg-data") { return empty(StatusCode::BAD_REQUEST); }
+        if query.len() != 2 || !payload.is_empty() || request.headers().contains_key("x-wg-data") { return empty(StatusCode::BAD_REQUEST); }
         let Some(nonce) = query.get("n") else { return empty(StatusCode::BAD_REQUEST); };
         let Some((body,proof)) = state.auth.challenge(request.headers(),request.uri().path(),nonce) else { return empty(StatusCode::UNAUTHORIZED); };
         let mut response = reply(StatusCode::OK, body, 0);
@@ -215,12 +235,6 @@ async fn handle(request: Request<Incoming>, state: Arc<State>) -> Result<Respons
         response.headers_mut().insert("content-type","application/json".parse().unwrap());
         return Ok(response);
     }
-    let payload = if request.headers().contains_key("x-wg-data") {
-        let Some(encoded) = auth::one(request.headers(),"x-wg-data").filter(|value| value.len() <= 5464) else { return empty(StatusCode::PAYLOAD_TOO_LARGE); };
-        let Ok(value) = STANDARD.decode(encoded) else { return empty(StatusCode::BAD_REQUEST); };
-        if value.len() > MAX_UPLOAD || STANDARD.encode(&value) != encoded { return empty(StatusCode::BAD_REQUEST); }
-        value
-    } else { Vec::new() };
     let verified = match state.auth.authorize(request.headers(),request.method().as_str(),request.uri().path(),&query,&payload) {
         Ok(verified) => verified,
         Err(failure) => {
@@ -232,11 +246,11 @@ async fn handle(request: Request<Incoming>, state: Arc<State>) -> Result<Respons
             });
         }
     };
-    let response = dispatch(request,state.clone(),&verified.keys.identity,query,probe).await?;
+    let response = dispatch(request,state.clone(),&verified.keys.identity,query,probe,payload).await?;
     Ok(signed(response,&verified,&state.auth).await)
 }
 
-async fn dispatch(request: Request<Incoming>, state: Arc<State>, identity: &str, query: std::collections::BTreeMap<String,String>, probe: Option<String>) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
+async fn dispatch(_request: Request<()>, state: Arc<State>, identity: &str, query: std::collections::BTreeMap<String,String>, probe: Option<String>, payload: Vec<u8>) -> Result<Response<Full<Bytes>>, std::convert::Infallible> {
     let empty = |status| Ok(reply(status, Vec::new(), 0));
     if let Some(nonce) = probe {
         let destination = if query.contains_key("host") || query.contains_key("port") {
@@ -297,11 +311,7 @@ async fn dispatch(request: Request<Incoming>, state: Arc<State>, identity: &str,
         let Some(number) = query.get("seq").and_then(|s| s.parse::<u64>().ok()).filter(|n| *n > 0) else {
             return empty(StatusCode::BAD_REQUEST);
         };
-        let Some(encoded) = request.headers().get("x-wg-data").filter(|s| s.len() <= 5464) else {
-            return empty(StatusCode::PAYLOAD_TOO_LARGE);
-        };
-        let Ok(data) = STANDARD.decode(encoded.as_bytes()) else { return empty(StatusCode::BAD_REQUEST); };
-        if data.len() > MAX_UPLOAD { return empty(StatusCode::PAYLOAD_TOO_LARGE); }
+        let data = payload;
         let Some(packets) = frames(&data) else { return empty(StatusCode::BAD_REQUEST); };
         let mut previous = session.upload.lock().await;
         if number <= *previous { return Ok(session_reply(&session, StatusCode::OK, Vec::new(), *previous)); }
@@ -346,7 +356,7 @@ async fn dispatch(request: Request<Incoming>, state: Arc<State>, identity: &str,
 pub async fn serve(file: &std::path::Path) -> anyhow::Result<()> {
     let config: Config = serde_json::from_slice(&std::fs::read(file)?)?;
     let settings = config.http_get;
-    if settings.version != 2 || settings.port == 0 || settings.credentials.is_empty()
+    if settings.version != 2 || !matches!(settings.method.as_str(), "GET" | "POST") || settings.port == 0 || settings.credentials.is_empty()
         || !settings.path.starts_with('/') || !settings.path.ends_with('/') { bail!("invalid HTTP GET profile"); }
     let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, settings.port)).await?;
     let auth = auth::Guard::new(&settings.credentials)?;
