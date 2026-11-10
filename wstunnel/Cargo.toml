@@ -9,7 +9,7 @@ repository = "https://github.com/erebe/wstunnel.git"
 serde_json = "1.0"
 ring = "0.17.14"
 ahash = { version = "0.8.12", features = [] }
-anyhow = "1.0.102"
+anyhow = "1.0.103"
 base64 = "0.22.1"
 scopeguard = "1.2.0"
 
@@ -45,7 +45,7 @@ rustls-pemfile = { version = "2.2.0", features = [] }
 x509-parser = "0.18.1"
 serde = { version = "1.0.228", features = ["derive"] }
 socket2 = { version = "0.6.3", features = ["all"] }
-tokio = { version = "1.52.1", features = ["io-std", "net", "signal", "sync", "time"] }
+tokio = { version = "1.53.3", features = ["io-std", "net", "signal", "sync", "time"] }
 tokio-stream = { version = "0.1.18", features = ["net"] }
 
 tracing = { version = "0.1.44", features = ["log"] }
@@ -56,7 +56,7 @@ derive_more = { version = "2.1.1", features = ["display", "error"] }
 
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["logging", "tls12"] }
 rcgen = { version = "0.14.7", default-features = false, features = [] }
-hickory-resolver = { version = "0.26.0", default-features = false, features = [
+hickory-resolver = { version = "0.26.2", default-features = false, features = [
   "system-config",
   "tokio",
 ] }
